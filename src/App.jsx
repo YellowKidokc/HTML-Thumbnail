@@ -1,361 +1,174 @@
-import { useState, useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { deleteDocument, getDocuments, saveDocument } from './db.js'
+import './styles.css'
 
-const STORAGE_KEY = 'page-board-data'
+const SIZE_LABELS = ['Small', 'Medium', 'Large']
+const isHtml = file => /\.html?$/i.test(file.name)
+const uid = () => `${Date.now()}-${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`
+const formatBytes = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1048576).toFixed(1)} MB`
+const formatDate = date => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date)
 
-function generateId() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
-}
-
-function loadPages() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch { return [] }
-}
-
-function savePages(pages) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(pages))
-}
-
-function PageCard({ page, onDelete, onUpdateSummary, apiKey }) {
-  const [summaryLoading, setSummaryLoading] = useState(false)
-  const [expanded, setExpanded] = useState(false)
-  const [imgError, setImgError] = useState(false)
-
-  const thumbUrl = `https://image.thum.io/get/width/600/crop/800/${page.url}`
-  const thumbUrlFull = `https://image.thum.io/get/width/600/crop/2000/${page.url}`
-
-  const fetchSummary = async () => {
-    if (!apiKey) return
-    setSummaryLoading(true)
-    try {
-      const res = await fetch('https://api.deepseek.com/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'deepseek-chat',
-          messages: [{
-            role: 'user',
-            content: `Summarize this webpage in 2-3 sentences. URL: ${page.url}${page.label ? ` (labeled: "${page.label}")` : ''}. Describe what this page/tool/app is and what it does. Be concise.`
-          }],
-          max_tokens: 200,
-        }),
-      })
-      const data = await res.json()
-      const summary = data?.choices?.[0]?.message?.content || 'Could not generate summary.'
-      onUpdateSummary(page.id, summary)
-    } catch (err) {
-      onUpdateSummary(page.id, 'Summary failed: ' + err.message)
-    } finally { setSummaryLoading(false) }
+function parseHtml(content) {
+  const parsed = new DOMParser().parseFromString(content, 'text/html')
+  return {
+    title: parsed.title.trim(),
+    searchableText: (parsed.body?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 500000),
   }
+}
 
-  return (
-    <div style={{
-      background: '#1a1a24',
-      borderRadius: '10px',
-      overflow: 'hidden',
-      border: '1px solid #2a2a3a',
-      display: 'flex',
-      flexDirection: 'column',
-      transition: 'border-color 0.2s',
-    }}
-    onMouseEnter={e => e.currentTarget.style.borderColor = '#3a3a5a'}
-    onMouseLeave={e => e.currentTarget.style.borderColor = '#2a2a3a'}
-    >
-      <div
-        style={{ position: 'relative', background: '#111118', minHeight: '180px', cursor: 'pointer' }}
-        onClick={() => setExpanded(!expanded)}
-      >
-        {!imgError ? (
-          <img
-            src={expanded ? thumbUrlFull : thumbUrl}
-            alt={page.label || page.url}
-            style={{
-              width: '100%',
-              display: 'block',
-              objectFit: 'cover',
-              maxHeight: expanded ? 'none' : '240px',
-            }}
-            onError={() => setImgError(true)}
-          />
-        ) : (
-          <div style={{
-            height: '180px', display: 'flex', alignItems: 'center',
-            justifyContent: 'center', color: '#444', fontSize: '13px',
-            padding: '20px', textAlign: 'center',
-          }}>
-            Screenshot unavailable — site may block external capture
-          </div>
-        )}
-        <div style={{
-          position: 'absolute', bottom: 6, right: 8,
-          background: 'rgba(0,0,0,0.7)', color: '#777',
-          fontSize: '10px', padding: '2px 8px', borderRadius: '4px',
-        }}>
-          {expanded ? 'collapse' : 'expand'}
+function download(item) {
+  const url = URL.createObjectURL(new Blob([item.content], { type: 'text/html;charset=utf-8' }))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = item.name
+  document.body.append(anchor)
+  anchor.click()
+  anchor.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function Preview({ item, position, total, onClose, onPrevious, onNext, onRemove }) {
+  const closeRef = useRef(null)
+  useEffect(() => {
+    closeRef.current?.focus()
+    const keydown = event => {
+      if (event.key === 'Escape') onClose()
+      if (event.key === 'ArrowLeft') onPrevious()
+      if (event.key === 'ArrowRight') onNext()
+    }
+    document.addEventListener('keydown', keydown)
+    return () => document.removeEventListener('keydown', keydown)
+  }, [onClose, onPrevious, onNext])
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={event => event.target === event.currentTarget && onClose()}>
+    <section className="modal" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+      <header className="modal-header">
+        <div className="file-heading"><span className="eyebrow">Preview {position + 1} of {total}</span><h2 id="preview-title">{item.title || item.name}</h2><span>{item.path}</span></div>
+        <div className="button-row">
+          <button className="icon-button" onClick={onPrevious} disabled={total < 2} aria-label="Previous document">←</button>
+          <button className="icon-button" onClick={onNext} disabled={total < 2} aria-label="Next document">→</button>
+          <button ref={closeRef} className="icon-button" onClick={onClose} aria-label="Close preview">×</button>
         </div>
-      </div>
+      </header>
+      <div className="preview-frame-wrap"><iframe title={`Preview of ${item.name}`} sandbox="" srcDoc={item.content} /></div>
+      <footer className="modal-footer">
+        <div><strong>{item.name}</strong><span>{formatBytes(item.size)} · Modified {formatDate(item.modifiedAt)} · Imported {formatDate(item.importedAt)}</span></div>
+        <div className="button-row"><button className="danger ghost" onClick={() => onRemove(item)}>Remove from library</button><button className="primary" onClick={() => download(item)}>Download HTML</button></div>
+      </footer>
+    </section>
+  </div>
+}
 
-      <div style={{ padding: '14px 16px', flex: 1, display: 'flex', flexDirection: 'column', gap: '8px' }}>
-        <div style={{ fontWeight: 600, fontSize: '15px', color: '#e0e0ec', lineHeight: 1.3 }}>
-          {page.label || new URL(page.url).hostname}
-        </div>
-        <a
-          href={page.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            fontSize: '12px', color: '#4a6cf7', textDecoration: 'none',
-            wordBreak: 'break-all', lineHeight: 1.3,
-          }}
-        >
-          {page.url.length > 80 ? page.url.slice(0, 80) + '…' : page.url}
-        </a>
-
-        {page.summary && (
-          <div style={{
-            fontSize: '13px', color: '#a0a0b8', lineHeight: 1.5,
-            padding: '8px 10px', background: '#12121c',
-            borderRadius: '6px', borderLeft: '3px solid #4a6cf7',
-          }}>
-            {page.summary}
-          </div>
-        )}
-
-        {!page.summary && (
-          <button
-            onClick={fetchSummary}
-            disabled={summaryLoading || !apiKey}
-            title={!apiKey ? 'Add DeepSeek API key in settings first' : ''}
-            style={{
-              fontSize: '12px', padding: '5px 10px', background: 'transparent',
-              border: '1px solid #2a2a3a', borderRadius: '5px',
-              color: apiKey ? '#888' : '#444',
-              cursor: summaryLoading ? 'wait' : apiKey ? 'pointer' : 'not-allowed',
-              alignSelf: 'flex-start',
-            }}
-          >
-            {summaryLoading ? 'Summarizing…' : 'Get AI Summary'}
-          </button>
-        )}
-
-        <div style={{
-          marginTop: 'auto', paddingTop: '6px',
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        }}>
-          <span style={{ fontSize: '11px', color: '#444' }}>
-            {new Date(page.added).toLocaleDateString()}
-          </span>
-          <button onClick={() => onDelete(page.id)} style={{
-            fontSize: '11px', color: '#a44', background: 'transparent',
-            border: 'none', cursor: 'pointer', padding: '2px 6px',
-          }}>
-            remove
-          </button>
-        </div>
-      </div>
+function DocumentCard({ item, onOpen, onDownload }) {
+  const [renderFailed, setRenderFailed] = useState(false)
+  return <article className="card">
+    <button className="thumbnail" onClick={onOpen} aria-label={`Preview ${item.name}`}>
+      {renderFailed && <div className="render-fallback">Preview unavailable<br /><span>Open the full preview to try again.</span></div>}
+      <iframe title={`Thumbnail of ${item.name}`} sandbox="" srcDoc={item.content} onError={() => setRenderFailed(true)} tabIndex="-1" />
+      <span className="open-label">Open preview</span>
+    </button>
+    <div className="card-body">
+      <h2 title={item.name}>{item.name}</h2>
+      <p className="document-title" title={item.title}>{item.title || 'Untitled HTML document'}</p>
+      <p className="path" title={item.path}>{item.path}</p>
+      <div className="meta"><span>{formatBytes(item.size)}</span><span>{formatDate(item.importedAt)}</span></div>
+      <button className="text-button" onClick={onDownload}>Download HTML</button>
     </div>
-  )
+  </article>
 }
 
 export default function App() {
-  const [pages, setPages] = useState([])
-  const [url, setUrl] = useState('')
-  const [label, setLabel] = useState('')
-  const [apiKey, setApiKey] = useState(() => {
-    try { return localStorage.getItem('page-board-apikey') || '' } catch { return '' }
-  })
-  const [showSettings, setShowSettings] = useState(false)
-  const [filter, setFilter] = useState('')
-  const inputRef = useRef(null)
+  const [documents, setDocuments] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [query, setQuery] = useState('')
+  const [sort, setSort] = useState('newest')
+  const [size, setSize] = useState(() => Number(localStorage.getItem('html-library-thumbnail-size') || 1))
+  const [dragging, setDragging] = useState(false)
+  const [progress, setProgress] = useState(null)
+  const [summary, setSummary] = useState(null)
+  const [duplicate, setDuplicate] = useState(null)
+  const [previewId, setPreviewId] = useState(null)
+  const uploadRef = useRef(null)
+  const folderRef = useRef(null)
 
-  useEffect(() => { setPages(loadPages()) }, [])
+  useEffect(() => { getDocuments().then(items => setDocuments(items)).catch(() => setSummary({ error: 'The local database could not be opened.' })).finally(() => setLoading(false)) }, [])
+  useEffect(() => { localStorage.setItem('html-library-thumbnail-size', size) }, [size])
 
-  const saveApiKey = (key) => {
-    setApiKey(key)
-    localStorage.setItem('page-board-apikey', key)
-  }
-
-  const addPage = () => {
-    let cleanUrl = url.trim()
-    if (!cleanUrl) return
-    if (!cleanUrl.startsWith('http')) cleanUrl = 'https://' + cleanUrl
-    const newPage = {
-      id: generateId(),
-      url: cleanUrl,
-      label: label.trim() || '',
-      summary: null,
-      added: Date.now(),
+  const chooseDuplicate = (file, existing) => new Promise(resolve => setDuplicate({ file, existing, resolve }))
+  const importFiles = async fileList => {
+    const files = Array.from(fileList)
+    let knownDocuments = [...documents]
+    const counts = { imported: 0, replaced: 0, skipped: 0, failed: 0 }
+    setSummary(null)
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index]
+      setProgress({ current: index + 1, total: files.length, name: file.name })
+      if (!isHtml(file)) { counts.skipped += 1; continue }
+      try {
+        const path = file.webkitRelativePath || file.name
+        const content = await file.text()
+        const match = knownDocuments.find(item => item.path === path && item.name === file.name)
+        let id = uid()
+        if (match) {
+          const action = await chooseDuplicate(file, match)
+          if (action === 'skip') { counts.skipped += 1; continue }
+          if (action === 'replace') { id = match.id; counts.replaced += 1 }
+          else counts.imported += 1
+        } else counts.imported += 1
+        const details = parseHtml(content)
+        const item = { id, name: file.name, path, size: file.size, modifiedAt: file.lastModified || Date.now(), importedAt: Date.now(), content, ...details }
+        await saveDocument(item)
+        knownDocuments = [item, ...knownDocuments.filter(entry => entry.id !== id)]
+        setDocuments(current => [item, ...current.filter(entry => entry.id !== id)])
+      } catch { counts.failed += 1 }
+      await new Promise(resolve => setTimeout(resolve, 0))
     }
-    const updated = [newPage, ...pages]
-    setPages(updated)
-    savePages(updated)
-    setUrl('')
-    setLabel('')
-    inputRef.current?.focus()
+    setProgress(null)
+    setSummary(counts)
   }
 
-  const deletePage = (id) => {
-    const updated = pages.filter(p => p.id !== id)
-    setPages(updated)
-    savePages(updated)
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    const items = needle ? documents.filter(item => [item.name, item.title, item.path, item.searchableText].some(value => value?.toLowerCase().includes(needle))) : [...documents]
+    return items.sort((a, b) => sort === 'oldest' ? a.importedAt - b.importedAt : sort === 'az' ? a.name.localeCompare(b.name) : sort === 'za' ? b.name.localeCompare(a.name) : sort === 'modified' ? b.modifiedAt - a.modifiedAt : b.importedAt - a.importedAt)
+  }, [documents, query, sort])
+
+  const remove = async item => {
+    if (!window.confirm(`Remove “${item.name}” from this library? The source file will not be changed.`)) return
+    await deleteDocument(item.id)
+    setDocuments(current => current.filter(entry => entry.id !== item.id))
+    setPreviewId(null)
   }
+  const previewIndex = visible.findIndex(item => item.id === previewId)
+  const movePreview = amount => visible.length && setPreviewId(visible[(previewIndex + amount + visible.length) % visible.length].id)
 
-  const updateSummary = (id, summary) => {
-    const updated = pages.map(p => p.id === id ? { ...p, summary } : p)
-    setPages(updated)
-    savePages(updated)
-  }
+  return <main>
+    <header className="app-header">
+      <div><span className="brand-mark">&lt;/&gt;</span><div><h1>HTML Thumbnail Library</h1><p>Your private, visual shelf for local HTML files.</p></div></div>
+      <div className="privacy"><span>●</span> Local only · IndexedDB</div>
+    </header>
 
-  const filtered = filter
-    ? pages.filter(p =>
-        (p.label || '').toLowerCase().includes(filter.toLowerCase()) ||
-        p.url.toLowerCase().includes(filter.toLowerCase()) ||
-        (p.summary || '').toLowerCase().includes(filter.toLowerCase())
-      )
-    : pages
+    <section className={`drop-zone ${dragging ? 'dragging' : ''}`} onDragEnter={event => { event.preventDefault(); setDragging(true) }} onDragOver={event => event.preventDefault()} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setDragging(false) }} onDrop={event => { event.preventDefault(); setDragging(false); importFiles(event.dataTransfer.files) }}>
+      <div><strong>Drop HTML files here</strong><span>Original files always stay untouched.</span></div>
+      <div className="button-row"><button className="primary" onClick={() => uploadRef.current.click()}>Upload HTML</button><button onClick={() => folderRef.current.click()}>Import Folder</button></div>
+      <input ref={uploadRef} className="visually-hidden" type="file" accept=".html,.htm,text/html" multiple onChange={event => { importFiles(event.target.files); event.target.value = '' }} />
+      <input ref={folderRef} className="visually-hidden" type="file" accept=".html,.htm,text/html" multiple webkitdirectory="" onChange={event => { importFiles(event.target.files); event.target.value = '' }} />
+    </section>
 
-  return (
-    <div style={{
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-      minHeight: '100vh',
-      background: '#0e0e16',
-      color: '#c8c8d8',
-      padding: '32px 24px',
-    }}>
-      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-        {/* Header */}
-        <div style={{ marginBottom: '28px' }}>
-          <h1 style={{
-            fontSize: '26px', fontWeight: 700, color: '#e8e8f4',
-            margin: 0, letterSpacing: '-0.5px',
-          }}>
-            Page Reference Board
-          </h1>
-          <p style={{ fontSize: '13px', color: '#555', margin: '6px 0 0' }}>
-            Paste a URL → see what it looks like → stop losing track.
-            {pages.length > 0 && ` ${pages.length} page${pages.length !== 1 ? 's' : ''} saved.`}
-          </p>
-        </div>
+    {progress && <div className="notice" role="status"><div><strong>Importing {progress.current} of {progress.total}</strong><span>{progress.name}</span></div><progress value={progress.current} max={progress.total} /></div>}
+    {summary && <div className={`notice summary ${summary.error ? 'error' : ''}`} role="status">{summary.error || <><strong>Import complete</strong><span>{summary.imported} imported · {summary.replaced} replaced · {summary.skipped} skipped · {summary.failed} failed</span></>}</div>}
 
-        {/* Add form */}
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
-          <input
-            ref={inputRef}
-            type="text"
-            placeholder="Paste URL here…"
-            value={url}
-            onChange={e => setUrl(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && addPage()}
-            style={{
-              flex: '2 1 280px', padding: '11px 14px', fontSize: '14px',
-              border: '1px solid #2a2a3a', borderRadius: '8px',
-              background: '#1a1a24', color: '#ddd', outline: 'none',
-            }}
-          />
-          <input
-            type="text"
-            placeholder="Label (optional)"
-            value={label}
-            onChange={e => setLabel(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && addPage()}
-            style={{
-              flex: '1 1 160px', padding: '11px 14px', fontSize: '14px',
-              border: '1px solid #2a2a3a', borderRadius: '8px',
-              background: '#1a1a24', color: '#ddd', outline: 'none',
-            }}
-          />
-          <button onClick={addPage} style={{
-            padding: '11px 24px', fontSize: '14px', fontWeight: 600,
-            background: '#4a6cf7', color: '#fff', border: 'none',
-            borderRadius: '8px', cursor: 'pointer',
-          }}>
-            Add
-          </button>
-          <button onClick={() => setShowSettings(!showSettings)} style={{
-            padding: '11px 16px', fontSize: '14px', background: 'transparent',
-            border: '1px solid #2a2a3a', borderRadius: '8px',
-            cursor: 'pointer', color: '#666',
-          }}>
-            ⚙
-          </button>
-        </div>
+    <section className="toolbar" aria-label="Library controls">
+      <label className="search"><span aria-hidden="true">⌕</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search filename, title, path, or page text…" aria-label="Search library" /></label>
+      <label>Sort <select value={sort} onChange={event => setSort(event.target.value)}><option value="newest">Newest imported</option><option value="oldest">Oldest imported</option><option value="az">Filename A–Z</option><option value="za">Filename Z–A</option><option value="modified">Recently modified</option></select></label>
+      <label className="size-control"><span>Thumbnail size</span><input type="range" min="0" max="2" value={size} onChange={event => setSize(Number(event.target.value))} aria-valuetext={SIZE_LABELS[size]} /><output>{SIZE_LABELS[size]}</output></label>
+      <button disabled={!documents.length} onClick={() => documents.forEach((item, index) => setTimeout(() => download(item), index * 200))}>Download all</button>
+    </section>
 
-        {/* Settings */}
-        {showSettings && (
-          <div style={{
-            padding: '14px 18px', background: '#12121c',
-            border: '1px solid #2a2a3a', borderRadius: '8px',
-            marginBottom: '14px', fontSize: '13px',
-          }}>
-            <div style={{ marginBottom: '8px', fontWeight: 600, color: '#c0c0d0' }}>
-              DeepSeek API Key
-            </div>
-            <input
-              type="password"
-              placeholder="sk-…"
-              value={apiKey}
-              onChange={e => saveApiKey(e.target.value)}
-              style={{
-                width: '100%', padding: '9px 12px', fontSize: '13px',
-                border: '1px solid #2a2a3a', borderRadius: '6px',
-                background: '#1a1a24', color: '#ddd', outline: 'none',
-                boxSizing: 'border-box',
-              }}
-            />
-            <div style={{ marginTop: '6px', color: '#555', fontSize: '11px' }}>
-              Saved in your browser's localStorage. Enables the "Get AI Summary" button on each card.
-            </div>
-          </div>
-        )}
+    <div className="library-heading"><h2>Library</h2><span>{visible.length === documents.length ? `${documents.length} file${documents.length === 1 ? '' : 's'}` : `${visible.length} of ${documents.length} files`}</span></div>
+    {loading ? <div className="empty"><h2>Opening your library…</h2></div> : visible.length ? <section className={`grid size-${size}`} aria-label="HTML documents">{visible.map(item => <DocumentCard key={item.id} item={item} onOpen={() => setPreviewId(item.id)} onDownload={() => download(item)} />)}</section> : <section className="empty"><div className="empty-icon">&lt;/&gt;</div><h2>{documents.length ? 'No files match your search' : 'Add your first HTML file'}</h2><p>{documents.length ? 'Try another filename, title, path, or phrase.' : 'Upload files, import a folder, or drag .html and .htm files into the area above. They are stored only in this browser.'}</p>{!documents.length && <button className="primary" onClick={() => uploadRef.current.click()}>Choose HTML files</button>}</section>}
 
-        {/* Filter */}
-        {pages.length > 5 && (
-          <input
-            type="text"
-            placeholder="Filter pages…"
-            value={filter}
-            onChange={e => setFilter(e.target.value)}
-            style={{
-              width: '100%', padding: '9px 14px', fontSize: '13px',
-              border: '1px solid #2a2a3a', borderRadius: '8px',
-              background: '#1a1a24', color: '#ddd', outline: 'none',
-              marginBottom: '18px', boxSizing: 'border-box',
-            }}
-          />
-        )}
-
-        {/* Grid */}
-        {filtered.length === 0 ? (
-          <div style={{
-            textAlign: 'center', padding: '100px 20px',
-            color: '#444', fontSize: '14px',
-          }}>
-            {pages.length === 0
-              ? 'No pages yet. Paste a URL above to get started.'
-              : 'No pages match your filter.'}
-          </div>
-        ) : (
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-            gap: '18px',
-          }}>
-            {filtered.map(page => (
-              <PageCard
-                key={page.id}
-                page={page}
-                onDelete={deletePage}
-                onUpdateSummary={updateSummary}
-                apiKey={apiKey}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  )
+    {previewIndex >= 0 && <Preview item={visible[previewIndex]} position={previewIndex} total={visible.length} onClose={() => setPreviewId(null)} onPrevious={() => movePreview(-1)} onNext={() => movePreview(1)} onRemove={remove} />}
+    {duplicate && <div className="modal-backdrop"><section className="duplicate-dialog" role="dialog" aria-modal="true" aria-labelledby="duplicate-title"><span className="eyebrow">Duplicate found</span><h2 id="duplicate-title">{duplicate.file.name}</h2><p>This path is already in your library. What would you like to do?</p><div className="duplicate-actions"><button className="primary" onClick={() => { duplicate.resolve('replace'); setDuplicate(null) }}>Replace existing</button><button onClick={() => { duplicate.resolve('keep'); setDuplicate(null) }}>Keep both</button><button className="ghost" onClick={() => { duplicate.resolve('skip'); setDuplicate(null) }}>Skip</button></div></section></div>}
+  </main>
 }
