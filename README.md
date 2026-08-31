@@ -1,39 +1,35 @@
-# HTML Thumbnail Library
+# HTML Thumbnail Library Desktop
 
-A private, visual library for loose `.html` and `.htm` files. Files are read in your browser and stored in **IndexedDB on this device**—the app does not upload them to a service or change the originals.
+A local Electron application for browsing large folders of `.html` and `.htm` files as cached visual thumbnails. The original React look and browser IndexedDB code (`src/db.js`) remain in the repository for migration compatibility; the desktop library uses main-process filesystem access and an application-data database.
 
-## Start on Windows
-
-Double-click **`START.bat`**. On first run it installs the required packages, starts the Vite development server, and opens the library in your browser.
-
-## Start from a terminal
+## Development
 
 ```bash
 npm install
-npm run dev
+npm run electron:dev
 ```
 
-Open the address shown by Vite (normally <http://localhost:3000>).
-
-## Use the library
-
-1. Select **Upload HTML**, select **Import Folder**, or drag one or more files onto the import area.
-2. Click a thumbnail for a large, scrollable preview. Use the arrow buttons (or arrow keys) to move between results and Escape to close.
-3. Search document names, titles, paths, and visible page text. Use the slider to change card size and the sort menu to reorder the grid.
-4. Use **Download HTML** to recreate the original file. **Remove from library** only removes the IndexedDB copy; it never deletes the source file.
-
-If a matching filename and relative path is imported again, choose whether to replace the library copy, keep both copies, or skip it. Non-HTML files are skipped and included in the import summary.
-
-## Privacy and limitations
-
-- Imported documents remain in this browser profile. Clearing site data removes the library.
-- Preview iframes are sandboxed without script permission, so scripts inside imported documents cannot execute or affect the application.
-- Remote images or styles referenced by an imported document may still be requested by the browser. For a completely offline preview, use self-contained HTML files.
-- Folder import uses the browser's `webkitdirectory` capability and works best in Chromium-based browsers.
-
-## Production build
+## Windows builds
 
 ```bash
-npm run build
-npm run preview
+npm run dist:portable
+npm run dist:installer
 ```
+
+Builds are written to `release/`. The packaged application is a normal GUI executable and does not run `npm run dev` or open a console window.
+
+## Use
+
+1. Click **Register folder** and choose a source folder.
+2. HTML files are found recursively; build, cache, temporary, archive, `.git`, and `node_modules` folders are excluded by default.
+3. Search/filter the cached thumbnail wall. Click a card for an isolated live preview; use **Open original** or **Show in folder** when needed.
+4. Use **Rescan all**, or leave the application open for its five-second filesystem reconciliation watcher.
+5. Export/import registrations, categories, favorites, recently-viewed state, and preferences with the sidebar JSON actions.
+
+The database and screenshot cache live under Electron's per-user application-data directory, never beside source HTML. Scans only read source files. Missing files remain recorded, and exact duplicates are grouped by SHA-256 without deleting anything.
+
+**Launch when Windows starts** is OFF by default. When enabled, Electron creates this application's standard login entry and starts minimized. This does not alter any shortcut belonging to **Website Drop Launcher**. The reboot batch prompt reported on the existing machine appears to come from Website Drop Launcher, not HTML Thumbnail Library.
+
+## Security and limitations
+
+Renderer Node integration is disabled, context isolation and sandboxing are enabled, and all privileged operations use the narrow preload API. Grid cards are cached PNG files rather than live iframes. The preview iframe is sandboxed; scripts may render but receive an opaque origin and cannot reach Electron APIs. Highly restrictive pages, pages requiring a server, or unavailable remote assets may still preview imperfectly. Rename detection currently appears as a missing old record plus a newly discovered record. The original browser IndexedDB library is preserved but automatic browser-profile migration is not included in this first version.
